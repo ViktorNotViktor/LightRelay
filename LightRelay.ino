@@ -12,7 +12,7 @@
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Relay
-#define PIN_RELAY PIN_A0
+#define PIN_RELAY 13
 
 // Light sensor
 #define PIN_LIGHT A0
