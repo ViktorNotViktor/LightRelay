@@ -11,6 +11,9 @@
 #define OLED_RESET     -1 //4 // Reset pin # (or -1 if sharing Arduino reset pin)
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
+enum ScreenMode { Main, Settings };
+ScreenMode g_screen_mode = ScreenMode::Main;
+
 // Relay
 #define PIN_RELAY 13
 
@@ -18,6 +21,8 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define PIN_LIGHT A0
 #define AVERAGE_MS 1000
 int g_light_val = 0;
+int g_light_lower = 0;
+int g_light_upper = 0;
 int g_light_samples = 0;
 unsigned long g_light_accumulated_val = 0;
 unsigned long g_light_accumulated_start_msec = 0;
@@ -175,6 +180,74 @@ void processRelay()
 ////////////////////////////////////////////////////////
 void processDisplay()
 {
+  switch(g_screen_mode)
+  {
+    case ScreenMode::Main:
+      printMainScreen();
+      break;
+
+    case ScreenMode::Settings:
+      printSettingsScreen();
+      break;
+  }
+
+  display.display();
+}
+
+void printMainScreen()
+{
+  display.clearDisplay();
+  setSelectedColor(false);
+
+  // current time
+  display.setCursor(0, 0);
+  display.setTextSize(2);
+  printTime(g_now.hour(), g_now.minute());
+
+  // start time
+  int x = display.getCursorX();
+  int y = display.getCursorY();
+  display.setTextSize(1);
+  printTime(g_start_hour, g_start_minute);
+
+  // TEST
+  display.print(" timer");
+
+  // end time
+  display.setCursor(x, y + 8);
+  printTime(g_end_hour, g_end_minute);
+
+  // light value
+  display.println();
+  display.setTextSize(2);
+  printLight(g_light_val);
+
+  // lower light bracket
+  x = display.getCursorX();
+  y = display.getCursorY();
+  display.setTextSize(1);
+  printLight(g_light_lower);
+
+  display.setCursor(x, y + 8);
+  printLight(g_light_upper);
+}
+
+void printTime(uint8_t hour, uint8_t minute)
+{
+  char buffer[6];
+  sprintf(buffer, "%02u:%02u", hour, minute);
+  display.print(buffer);
+}
+
+void printLight(int light)
+{
+  char buffer[5];
+  sprintf(buffer, "%4d", light);
+  display.print(buffer);
+}
+
+void printSettingsScreen()
+{
   display.clearDisplay();
   display.setCursor(0, 0);
 	display.setTextSize(1);
@@ -217,8 +290,6 @@ void processDisplay()
 	// char szBuffer[nBufferSize];
 	// snprintf(szBuffer, nBufferSize, "%02lu:%02lu:%02lu", lHours, lMinutes, lSeconds);
 	// display.print(szBuffer);
-
-	display.display();
 }
 
 void setSelectedColor(bool is_selected)
