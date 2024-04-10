@@ -17,25 +17,26 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 // Light sensor
 #define PIN_LIGHT A0
 #define AVERAGE_MS 1000
-int g_nLight = 0;
-int g_nLightSamples = 0;
-unsigned long g_nLightAccumulated = 0;
-unsigned long g_nLightAccumulatedStartedMS = 0;
+int g_light_val = 0;
+int g_light_samples = 0;
+unsigned long g_light_accumulated_val = 0;
+unsigned long g_light_accumulated_start_msec = 0;
 
 // RTC
 DS3231M_Class DS3231M;
+uint8_t g_start_hour = 0, g_start_minute = 0, g_end_hour = 0, g_end_minute = 0;
 
 // Remote
 #define PIN_REMOTE 2
 
-bool g_bOpenedByRTC = false;
-bool g_bOpenedByLightSensor = false;
-bool g_bOpenedByHisteresis = false;
-bool g_bOpenRelay = false;
+bool g_is_opened_by_rtc = false;
+bool g_is_opened_by_light = false;
+bool g_is_opened_by_histeresis = false;
+bool g_open_relay = false;
 
-DateTime g_dtNow;
-uint16_t g_nButton = 0;
-unsigned long g_nLastButtonPressedMS = 0;
+DateTime g_now;
+uint16_t g_button = 0;
+unsigned long g_last_button_msec = 0;
 #define BUTTON_THRESHOLD_MS 200
 
 #define BTN_1 0x45
@@ -112,9 +113,9 @@ void processRemote()
         }
         Serial.println();
 
-        if (millis() - g_nLastButtonPressedMS > BUTTON_THRESHOLD_MS)
+        if (millis() - g_last_button_msec > BUTTON_THRESHOLD_MS)
         {
-          g_nButton = IrReceiver.decodedIRData.command;
+          g_button = IrReceiver.decodedIRData.command;
         }
         
         // /*
@@ -130,7 +131,7 @@ void processRemote()
 ////////////////////////////////////////////////////////
 void processRTC()
 {
-  g_dtNow = DS3231M.now();
+  g_now = DS3231M.now();
   // const size_t nBufferSize = 32; //TODO: 20
   // char szBuffer[nBufferSize];
   // sprintf(szBuffer, "%04d-%02d-%02d %02d:%02d:%02d", now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
@@ -141,23 +142,23 @@ void processRTC()
 ////////////////////////////////////////////////////////
 void processLightSensor()
 {
-  int nCurrentLight = analogRead(PIN_LIGHT);
+  int light_sample_val = analogRead(PIN_LIGHT);
 
   unsigned long nNowMS = millis();
-  if (nNowMS - g_nLightAccumulatedStartedMS < AVERAGE_MS)
+  if (nNowMS - g_light_accumulated_start_msec < AVERAGE_MS)
   {
-    g_nLightAccumulated += nCurrentLight;
-    g_nLightSamples++;
+    g_light_accumulated_val += light_sample_val;
+    g_light_samples++;
   }
   else
   {
-    g_nLight = g_nLightAccumulated / g_nLightSamples;
-    g_nLightAccumulated = nCurrentLight;
-    g_nLightSamples = 1;
-    g_nLightAccumulatedStartedMS = nNowMS;
+    g_light_val = g_light_accumulated_val / g_light_samples;
+    g_light_accumulated_val = light_sample_val;
+    g_light_samples = 1;
+    g_light_accumulated_start_msec = nNowMS;
   }
   //Serial.print("Light=");
-  //Serial.println(g_nLight);
+  //Serial.println(g_light_val);
 }
 
 ////////////////////////////////////////////////////////
@@ -167,29 +168,40 @@ void processHisteresis()
 ////////////////////////////////////////////////////////
 void processRelay()
 {
-  g_bOpenRelay = g_bOpenedByRTC && g_bOpenedByLightSensor && g_bOpenedByHisteresis;
-  digitalWrite(PIN_RELAY, g_bOpenRelay ? HIGH : LOW);
+  g_open_relay = g_is_opened_by_rtc && g_is_opened_by_light && g_is_opened_by_histeresis;
+  digitalWrite(PIN_RELAY, g_open_relay ? HIGH : LOW);
 }
 
 ////////////////////////////////////////////////////////
 void processDisplay()
 {
   display.clearDisplay();
-
+  display.setCursor(0, 0);
 	display.setTextSize(1);
-	display.setCursor(0, 0);
-	display.setTextColor(WHITE);
-	const size_t nBufferSize = 20;
-  char szBuffer[nBufferSize];
-  sprintf(szBuffer, "%04d-%02d-%02d %02d:%02d:%02d", g_dtNow.year(), g_dtNow.month(), g_dtNow.day(), g_dtNow.hour(), g_dtNow.minute(), g_dtNow.second());
-  display.println(szBuffer);
 
-  display.setTextSize(1);
-  display.print("#");
-  display.println(g_nButton, HEX);
-  display.setTextSize(2);
-  display.print("L=");
-  display.print(g_nLight);
+  setSelectedColor(g_is_opened_by_rtc);
+  
+  display.print('T');
+  setSelectedColor(false);
+  display.print(' ');
+
+  printCurrentTime(false);
+  printStartTime(true);
+  printEndTime(false);
+
+	// display.setCursor(0, 0);
+	// display.setTextColor(WHITE);
+	// const size_t buffer_size = 20;
+  // char buffer[buffer_size];
+  // sprintf(buffer, "%04d-%02d-%02d %02d:%02d:%02d", g_now.year(), g_now.month(), g_now.day(), g_now.hour(), g_now.minute(), g_now.second());
+  // display.println(szBuffer);
+
+  // display.setTextSize(1);
+  // display.print("#");
+  // display.println(g_button, HEX);
+  // display.setTextSize(2);
+  // display.print("L=");
+  // display.print(g_light_val);
 	// int x = display.getCursorX();
 	// int y = display.getCursorY();
 	// display.setTextSize(1);
@@ -207,6 +219,52 @@ void processDisplay()
 	// display.print(szBuffer);
 
 	display.display();
+}
+
+void setSelectedColor(bool is_selected)
+{
+  if(is_selected)
+    display.setTextColor(BLACK, WHITE);
+  else
+    display.setTextColor(WHITE, BLACK);
+}
+
+void printCurrentTime(bool is_selected)
+{
+  setSelectedColor(is_selected);
+
+  constexpr int buffer_size = 6;
+  char buffer[buffer_size];
+  sprintf(buffer, "%02u:%02u", g_now.hour(), g_now.minute());
+  display.print(buffer);
+}
+
+void printStartTime(bool is_selected)
+{
+  setSelectedColor(false);
+  display.print(" [");
+
+  setSelectedColor(is_selected);
+
+  constexpr int buffer_size = 6;
+  char buffer[buffer_size];
+  sprintf(buffer, "%02u:%02u", g_start_hour, g_start_minute);
+  display.print(buffer);
+}
+
+void printEndTime(bool is_selected)
+{
+  setSelectedColor(false);
+  display.print('-');
+
+  setSelectedColor(is_selected);
+  constexpr int buffer_size = 6;
+  char buffer[buffer_size];
+  sprintf(buffer, "%02u:%02u", g_end_hour, g_end_minute);
+  display.print(buffer);
+
+  setSelectedColor(false);
+  display.print(']');
 }
 
 ////////////////////////////////////////////////////////
