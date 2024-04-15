@@ -14,11 +14,18 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 enum ScreenMode { Main, Settings };
 ScreenMode g_screen_mode = ScreenMode::Main;
 
-// Relay
+enum Setting { LightLow, LightHigh, StartTime, EndTime, Cooldown, ScreenOff, CurrentDate, CurrentTime, Setting_Size };
+Setting g_setting = Setting::LightLow;
+
+// pins
 #define PIN_RELAY 13
+#define PIN_LIGHT A0
+#define PIN_REMOTE 2
+
+// Relay
+
 
 // Light sensor
-#define PIN_LIGHT A0
 #define AVERAGE_MS 1000
 int g_light_val = 0;
 int g_light_lower = 0;
@@ -29,14 +36,17 @@ unsigned long g_light_accumulated_start_msec = 0;
 
 // RTC
 DS3231M_Class DS3231M;
-uint8_t g_start_hour = 0, g_start_minute = 0, g_end_hour = 0, g_end_minute = 0;
+uint8_t g_start_hour = 0;
+uint8_t g_start_minute = 0;
+uint8_t g_end_hour = 0;
+uint8_t g_end_minute = 0;
+
+uint8_t g_cooldown_mins = 0;
+uint8_t g_screen_off_mins = 0;
 
 // Remote
-#define PIN_REMOTE 2
-
-bool g_is_opened_by_rtc = false;
+bool g_is_opened_by_time = false;
 bool g_is_opened_by_light = false;
-bool g_is_opened_by_histeresis = false;
 bool g_open_relay = false;
 
 DateTime g_now;
@@ -61,7 +71,6 @@ unsigned long g_last_button_msec = 0;
 #define BTN_LEFT 0x08
 #define BTN_RIGHT 0x5A
 #define BTN_OK  0x1C
-
 
 
 /////////////////////////////////////////////////////////
@@ -137,11 +146,19 @@ void processRemote()
 void processRTC()
 {
   g_now = DS3231M.now();
-  // const size_t nBufferSize = 32; //TODO: 20
-  // char szBuffer[nBufferSize];
-  // sprintf(szBuffer, "%04d-%02d-%02d %02d:%02d:%02d", now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
-  // Serial.println(szBuffer);
-  // delay(200);
+  
+  int now_minutes = g_now.hour() * 60 + g_now.minute();
+  int start_minutes = g_start_hour * 60 + g_start_minute;
+  int end_minutes = g_end_hour * 60 + g_end_minute;
+
+  if(start_minutes < end_minutes)
+  {
+    g_is_opened_by_time = start_minutes <= now_minutes && now_minutes <= end_minutes;
+  }
+  else
+  {
+    g_is_opened_by_time = false;
+  }
 }
 
 ////////////////////////////////////////////////////////
@@ -149,8 +166,8 @@ void processLightSensor()
 {
   int light_sample_val = analogRead(PIN_LIGHT);
 
-  unsigned long nNowMS = millis();
-  if (nNowMS - g_light_accumulated_start_msec < AVERAGE_MS)
+  unsigned long msec = millis();
+  if (msec - g_light_accumulated_start_msec < AVERAGE_MS)
   {
     g_light_accumulated_val += light_sample_val;
     g_light_samples++;
@@ -160,20 +177,17 @@ void processLightSensor()
     g_light_val = g_light_accumulated_val / g_light_samples;
     g_light_accumulated_val = light_sample_val;
     g_light_samples = 1;
-    g_light_accumulated_start_msec = nNowMS;
+    g_light_accumulated_start_msec = msec;
+
+    g_is_opened_by_light = g_light_val >= (g_is_opened_by_light ? g_light_lower : g_light_upper);
   }
-  //Serial.print("Light=");
-  //Serial.println(g_light_val);
 }
 
-////////////////////////////////////////////////////////
-void processHisteresis()
-{}
 
 ////////////////////////////////////////////////////////
 void processRelay()
 {
-  g_open_relay = g_is_opened_by_rtc && g_is_opened_by_light && g_is_opened_by_histeresis;
+  g_open_relay = g_is_opened_by_time && g_is_opened_by_light;
   digitalWrite(PIN_RELAY, g_open_relay ? HIGH : LOW);
 }
 
@@ -194,23 +208,39 @@ void processDisplay()
   display.display();
 }
 
+///////////////////////////////////////////////////////////
+void setSelectedColor(bool is_selected)
+{
+  if(is_selected)
+    display.setTextColor(BLACK, WHITE);
+  else
+    display.setTextColor(WHITE, BLACK);
+}
+
+//////////////////////////////////////////////////////////
+void gotoChar(uint8_t row, uint8_t col)
+{
+  display.setCursor(col * 6, row * 8);
+}
+
 void printMainScreen()
 {
   display.clearDisplay();
-  setSelectedColor(false);
 
   // current time
+  setSelectedColor(g_is_opened_by_time);
   display.setCursor(0, 0);
   display.setTextSize(2);
   printTime(g_now.hour(), g_now.minute());
 
   // start time
+  setSelectedColor(false);
   int x = display.getCursorX();
   int y = display.getCursorY();
   display.setTextSize(1);
   printTime(g_start_hour, g_start_minute);
 
-  // TEST
+  // TODO: countdown
   display.print(" timer");
 
   // end time
@@ -220,9 +250,11 @@ void printMainScreen()
   // light value
   display.println();
   display.setTextSize(2);
+  setSelectedColor(g_is_opened_by_light);
   printLight(g_light_val);
 
   // lower light bracket
+  setSelectedColor(false);
   x = display.getCursorX();
   y = display.getCursorY();
   display.setTextSize(1);
@@ -239,6 +271,7 @@ void printTime(uint8_t hour, uint8_t minute)
   display.print(buffer);
 }
 
+///////////////////////////////////////////////////////
 void printLight(int light)
 {
   char buffer[5];
@@ -246,97 +279,128 @@ void printLight(int light)
   display.print(buffer);
 }
 
+/////////////////////////////////////////////////////////
 void printSettingsScreen()
 {
-  display.clearDisplay();
-  display.setCursor(0, 0);
-	display.setTextSize(1);
+  // 21x4 characters
+  //+---------------------+
+  //|LLO[XXXX] LHI[XXXX]..|
+  //|[HH:NN]-[HH:NN]CD[XX]|
+  //|SCR OFF[XX]..........|
+  //|[YYYY-MM-DD][HH:NN]..|
+  //+---------------------+
 
-  setSelectedColor(g_is_opened_by_rtc);
+  enum Coord { ROW, COL, Coord_Size };
+  uint8_t coord[Setting::Setting_Size][Coord_Size] = {
+    { 0,  0  },  // Setting::LightLow
+    { 0,  10 },  // Setting::LightHigh
+    { 1,  0  },  // Setting::StartTime
+    { 1,  8  },  // Setting::EndTime
+    { 1,  15 },  // Setting::Cooldown
+    { 3,  0  },  // Setting::ScreenOff
+    { 4,  0  },  // Setting::CurrentDate
+    { 4,  12 },  // Setting::CurrentTime
+  };
   
-  display.print('T');
-  setSelectedColor(false);
-  display.print(' ');
+  gotoChar(coord[Setting::LightLow][ROW], coord[Setting::LightLow][COL]);
+  printSettingsLight("LLO", g_light_lower, g_setting == Setting::LightLow);
 
-  printCurrentTime(false);
-  printStartTime(true);
-  printEndTime(false);
+  gotoChar(coord[Setting::LightHigh][ROW], coord[Setting::LightHigh][COL]);
+  printSettingsLight("LHI", g_light_upper, g_setting == Setting::LightHigh);
 
-	// display.setCursor(0, 0);
-	// display.setTextColor(WHITE);
-	// const size_t buffer_size = 20;
-  // char buffer[buffer_size];
-  // sprintf(buffer, "%04d-%02d-%02d %02d:%02d:%02d", g_now.year(), g_now.month(), g_now.day(), g_now.hour(), g_now.minute(), g_now.second());
-  // display.println(szBuffer);
+  gotoChar(coord[Setting::StartTime][ROW], coord[Setting::StartTime][COL]);
+  printSettingsTime(g_start_hour, g_start_minute, g_setting == Setting::StartTime);
 
-  // display.setTextSize(1);
-  // display.print("#");
-  // display.println(g_button, HEX);
-  // display.setTextSize(2);
-  // display.print("L=");
-  // display.print(g_light_val);
-	// int x = display.getCursorX();
-	// int y = display.getCursorY();
-	// display.setTextSize(1);
-	// display.print("CO2");
-	// display.setCursor(x, y + 8);
-	// display.println("PPM\n");
+  gotoChar(coord[Setting::EndTime][ROW], coord[Setting::EndTime][COL]);
+  printSettingsTime(g_end_hour, g_end_minute, g_setting == Setting::EndTime);
 
-	// unsigned long lSeconds = (current_msec / 1000) % 60;
-	// unsigned long lMinutes = (current_msec / 1000 / 60) % 60;
-	// unsigned long lHours = current_msec / 1000 / 60 / 60;
+  gotoChar(coord[Setting::Cooldown][ROW], coord[Setting::Cooldown][COL]);
+  printSettingsCooldown(g_setting == Setting::Cooldown);
 
-	// constexpr int nBufferSize = 16;
-	// char szBuffer[nBufferSize];
-	// snprintf(szBuffer, nBufferSize, "%02lu:%02lu:%02lu", lHours, lMinutes, lSeconds);
-	// display.print(szBuffer);
+  gotoChar(coord[Setting::ScreenOff][ROW], coord[Setting::ScreenOff][COL]);
+  printSettingsScreenOff(g_setting == Setting::ScreenOff);
+
+  gotoChar(coord[Setting::CurrentDate][ROW], coord[Setting::CurrentDate][COL]);
+  printSettingsDate(g_setting == Setting::CurrentDate);
+
+  gotoChar(coord[Setting::CurrentTime][ROW], coord[Setting::CurrentTime][COL]);
+  printSettingsTime(g_now.hour(), g_now.minute(), g_setting == Setting::CurrentTime);
 }
 
-void setSelectedColor(bool is_selected)
-{
-  if(is_selected)
-    display.setTextColor(BLACK, WHITE);
-  else
-    display.setTextColor(WHITE, BLACK);
-}
-
-void printCurrentTime(bool is_selected)
-{
-  setSelectedColor(is_selected);
-
-  constexpr int buffer_size = 6;
-  char buffer[buffer_size];
-  sprintf(buffer, "%02u:%02u", g_now.hour(), g_now.minute());
-  display.print(buffer);
-}
-
-void printStartTime(bool is_selected)
+void printSettingsDate(bool is_selected)
 {
   setSelectedColor(false);
-  display.print(" [");
+  display.print('[');
 
   setSelectedColor(is_selected);
-
-  constexpr int buffer_size = 6;
-  char buffer[buffer_size];
-  sprintf(buffer, "%02u:%02u", g_start_hour, g_start_minute);
-  display.print(buffer);
-}
-
-void printEndTime(bool is_selected)
-{
-  setSelectedColor(false);
-  display.print('-');
-
-  setSelectedColor(is_selected);
-  constexpr int buffer_size = 6;
-  char buffer[buffer_size];
-  sprintf(buffer, "%02u:%02u", g_end_hour, g_end_minute);
+  char buffer[11];
+  sprintf(buffer, "%04u-%02u-%02u", g_now.year(), g_now.month(), g_now.day());
   display.print(buffer);
 
   setSelectedColor(false);
   display.print(']');
 }
+
+//////////////////////////////////////////////////////////////////////////
+void printSettingsTime(uint8_t hour, uint8_t minute, bool is_selected)
+{
+  setSelectedColor(false);
+  display.print('[');
+
+  setSelectedColor(is_selected);
+  char buffer[6];
+  sprintf(buffer, "%02u:%02u", hour, minute);
+  display.print(buffer);
+
+  setSelectedColor(false);
+  display.print(']');
+};
+
+////////////////////////////////////////////////////////////
+void printSettingsLight(const char* prefix, int light, bool is_selected)
+{
+  setSelectedColor(false);
+  display.print('[');
+  display.print(prefix);
+
+  setSelectedColor(is_selected);
+  char buffer[6];
+  sprintf(buffer, "%04d", light);
+  display.print(buffer);
+
+  setSelectedColor(false);
+  display.print(']');
+};
+
+////////////////////////////////////////////////////////
+void printSettingsCooldown(bool is_selected)
+{
+  setSelectedColor(false);
+  display.print("CD[");
+
+  setSelectedColor(is_selected);
+  char buffer[4];
+  sprintf(buffer, "%02d", g_cooldown_mins);
+  display.print(buffer);
+
+  setSelectedColor(false);
+  display.print(']');
+};
+
+////////////////////////////////////////////////////////
+void printSettingsScreenOff(bool is_selected)
+{
+  setSelectedColor(false);
+  display.print("SCR OFF[");
+
+  setSelectedColor(is_selected);
+  char buffer[4];
+  sprintf(buffer, "%02d", g_screen_off_mins);
+  display.print(buffer);
+
+  setSelectedColor(false);
+  display.print(']');
+};
 
 ////////////////////////////////////////////////////////
 void loop()
@@ -344,7 +408,6 @@ void loop()
   processRemote();
   processRTC();
   processLightSensor();
-  processHisteresis();
 
   processRelay();
   processDisplay();
