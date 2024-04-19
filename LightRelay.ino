@@ -1,5 +1,6 @@
 #include <Adafruit_SSD1306.h>
 #include <DS3231M.h>
+#include <EEPROM.h>
 
 #define DECODE_NEC
 #include <IRremote.hpp>
@@ -14,8 +15,8 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 enum ScreenMode { Main, Settings };
 ScreenMode g_screen_mode = ScreenMode::Main;
 
-enum Setting { LightLow, LightHigh, StartTime, EndTime, Cooldown, ScreenOff, CurrentDate, CurrentTime, Setting_Size };
-Setting g_setting = Setting::LightLow;
+enum Setting { LightLower, LightUpper, StartTime, EndTime, Cooldown, ScreenOff, CurrentDate, CurrentTime, Setting_Size };
+Setting g_setting = Setting::LightLower;
 
 // pins
 #define PIN_RELAY 13
@@ -26,13 +27,13 @@ Setting g_setting = Setting::LightLow;
 
 
 // Light sensor
-#define AVERAGE_MS 1000
+#define LIGHT_AVERAGE_SEC 1
 int g_light_val = 0;
 int g_light_lower = 0;
 int g_light_upper = 0;
 int g_light_samples = 0;
 unsigned long g_light_accumulated_val = 0;
-unsigned long g_light_accumulated_start_msec = 0;
+DateTime g_light_accumulated_start;
 
 // RTC
 DS3231M_Class DS3231M;
@@ -42,7 +43,10 @@ uint8_t g_end_hour = 0;
 uint8_t g_end_minute = 0;
 
 uint8_t g_cooldown_mins = 0;
+DateTime g_cooldown_start;
+
 uint8_t g_screen_off_mins = 0;
+DateTime g_screen_off_start;
 
 // Remote
 bool g_is_opened_by_time = false;
@@ -72,14 +76,14 @@ unsigned long g_last_button_msec = 0;
 #define BTN_RIGHT 0x5A
 #define BTN_OK  0x1C
 
-
 /////////////////////////////////////////////////////////
 void setup()
 {
-  // put your setup code here, to run once:
-
   // debug console
   Serial.begin(9600);
+
+  // EEPROM
+  readEEPROM();
 
   // relay
   pinMode(PIN_RELAY, OUTPUT);
@@ -102,9 +106,62 @@ void setup()
 
   // Light
   pinMode(PIN_LIGHT, INPUT);
+  g_light_accumulated_start = DS3231M.now();
 
   // Remote
   IrReceiver.begin(PIN_REMOTE);
+}
+
+////////////////////////////////////////////////////////
+// enum EEPROM_Size {
+//   Size_LightLower = 2,
+//   Size_LightUpper = 2,
+//   Size_StartHour = 1,
+//   Size_StartMinute = 1,
+//   Size_EndHour = 1,
+//   Size_EndMinute = 1,
+//   Size_Cooldown = 1,
+//   Size_ScreenOff = 1,
+// };
+
+// enum EEPROM_Address_Size {
+//   Addr_LightLower = 0,
+//   Addr_LightUpper = Addr_LightLower + Size_LightLower,
+//   Addr_StartHour = Addr_LightUpper + Size_LightUpper,
+//   Addr_StartMinute = Addr_StartHour + Size_StartHour,
+//   Addr_EndHour = Addr_StartMinute + Size_StartMinute,
+//   Addr_EndMinute = Addr_EndHour + Size_EndHour,
+//   Addr_Cooldown = Addr_EndMinute + Size_EndMinute,
+//   Addr_ScreenOff = Addr_Cooldown + Size_Cooldown,
+// };
+
+#define SETTING_READ(x) { EEPROM.get(addr, x); addr += sizeof(x); }
+#define SETTING_WRITE(x) { EEPROM.put(addr, x); addr += sizeof(x); }
+
+void readEEPROM()
+{
+  int addr = 0;
+  SETTING_READ(g_light_lower);
+  SETTING_READ(g_light_upper);
+  SETTING_READ(g_start_hour);
+  SETTING_READ(g_start_minute);
+  SETTING_READ(g_end_hour);
+  SETTING_READ(g_end_minute);
+  SETTING_READ(g_cooldown_mins);
+  SETTING_READ(g_screen_off_mins);
+}
+
+void writeEEPROM()
+{
+  int addr = 0;
+  SETTING_WRITE(g_light_lower);
+  SETTING_WRITE(g_light_upper);
+  SETTING_WRITE(g_start_hour);
+  SETTING_WRITE(g_start_minute);
+  SETTING_WRITE(g_end_hour);
+  SETTING_WRITE(g_end_minute);
+  SETTING_WRITE(g_cooldown_mins);
+  SETTING_WRITE(g_screen_off_mins);
 }
 
 ////////////////////////////////////////////////////////
@@ -143,6 +200,12 @@ void processRemote()
     }
 }
 ////////////////////////////////////////////////////////
+void resetButton()
+{
+  g_button = 0;
+}
+
+////////////////////////////////////////////////////////
 void processRTC()
 {
   g_now = DS3231M.now();
@@ -153,7 +216,9 @@ void processRTC()
 
   if(start_minutes < end_minutes)
   {
-    g_is_opened_by_time = start_minutes <= now_minutes && now_minutes <= end_minutes;
+    int32_t current_cooldown_mins = (g_now - g_cooldown_start).totalseconds() / 60;
+    g_is_opened_by_time = start_minutes <= now_minutes && now_minutes <= end_minutes
+                          && current_cooldown_mins > g_cooldown_mins;
   }
   else
   {
@@ -166,8 +231,8 @@ void processLightSensor()
 {
   int light_sample_val = analogRead(PIN_LIGHT);
 
-  unsigned long msec = millis();
-  if (msec - g_light_accumulated_start_msec < AVERAGE_MS)
+  TimeSpan diff = g_now - g_light_accumulated_start; 
+  if (diff.totalseconds() < LIGHT_AVERAGE_SEC)
   {
     g_light_accumulated_val += light_sample_val;
     g_light_samples++;
@@ -175,9 +240,10 @@ void processLightSensor()
   else
   {
     g_light_val = g_light_accumulated_val / g_light_samples;
+
     g_light_accumulated_val = light_sample_val;
     g_light_samples = 1;
-    g_light_accumulated_start_msec = msec;
+    g_light_accumulated_start = g_now;
 
     g_is_opened_by_light = g_light_val >= (g_is_opened_by_light ? g_light_lower : g_light_upper);
   }
@@ -240,8 +306,9 @@ void printMainScreen()
   display.setTextSize(1);
   printTime(g_start_hour, g_start_minute);
 
-  // TODO: countdown
-  display.print(" timer");
+  // cooldown
+  display.print(" CD=");
+  display.print((g_now - g_cooldown_start).totalseconds() / 60);
 
   // end time
   display.setCursor(x, y + 8);
@@ -279,9 +346,94 @@ void printLight(int light)
   display.print(buffer);
 }
 
+void moveSettingByButton()
+{
+  if (g_button != BTN_RIGHT && g_button != BTN_LEFT && g_button != BTN_DOWN && g_button != BTN_UP)
+    return;
+
+  constexpr uint8_t total_rows = 4;
+  constexpr uint8_t total_cols = 3;
+  // This array represents position of the settings on the screen.
+  // Setting_Size means invalid value.
+  Setting pos[total_rows][total_cols] = {
+    { LightLower,   LightUpper,   Setting_Size  },
+    { StartTime,    EndTime,      Cooldown      },
+    { ScreenOff,    Setting_Size, Setting_Size  },
+    { CurrentDate,  CurrentTime,  Setting_Size  },
+  };
+
+  // find position of the current setting
+  uint8_t cur_row = 0, cur_col = 0;
+  bool found = false;
+  for (cur_row = 0; cur_row < total_rows && !found; cur_row++)
+  {
+    for (cur_col = 0; cur_col < total_cols && !found; cur_col++)
+    {
+      found = pos[cur_row][cur_col] == g_setting;
+    }
+  }
+
+  auto fnLastInRow = [&](uint8_t row) -> Setting
+  {
+    // skip invalid values at the end
+    uint8_t col = 0;
+    for (col = total_cols - 1; col >= 0 && pos[row][col] == Setting_Size; col--);
+    return pos[row][col];
+  };
+
+  auto fnFirstInLowerRow = [&](uint8_t row) -> Setting
+  {
+    if (row + 1 <= total_rows - 1)
+      return pos[row + 1][0];
+    else
+      return pos[0][0];
+  };
+
+  auto fnFirstInUpperRow = [&](uint8_t row) -> Setting
+  {
+    if (row - 1 >= 0)
+      return pos[row - 1][0];
+    else
+      return pos[total_rows - 1][0];
+  };
+
+  switch (g_button)  
+  {
+    case BTN_RIGHT:
+      if (cur_col + 1 < total_cols && pos[cur_row][cur_col + 1] != Setting_Size)
+        g_setting = pos[cur_row][cur_col + 1];
+      else
+        g_setting = fnFirstInLowerRow(cur_row);
+      break;
+
+    case BTN_LEFT:
+      if (cur_col - 1 >= 0)
+        g_setting = pos[cur_row][cur_col - 1];
+      else
+      {
+        if (cur_row - 1 >= 0)
+          g_setting = fnLastInRow(cur_row - 1);
+        else
+          g_setting = fnLastInRow(total_rows - 1);
+      }
+      break;
+
+    case BTN_DOWN:
+      g_setting = fnFirstInLowerRow(cur_row);
+      break;
+
+    case BTN_UP:
+      g_setting = fnFirstInUpperRow(cur_row);
+      break;
+  }
+
+  resetButton();
+}
+
 /////////////////////////////////////////////////////////
 void printSettingsScreen()
 {
+  // 128x32 pixels
   // 21x4 characters
   //+---------------------+
   //|LLO[XXXX] LHI[XXXX]..|
@@ -289,11 +441,12 @@ void printSettingsScreen()
   //|SCR OFF[XX]..........|
   //|[YYYY-MM-DD][HH:NN]..|
   //+---------------------+
+  moveSettingByButton();
 
   enum Coord { ROW, COL, Coord_Size };
   uint8_t coord[Setting::Setting_Size][Coord_Size] = {
-    { 0,  0  },  // Setting::LightLow
-    { 0,  10 },  // Setting::LightHigh
+    { 0,  0  },  // Setting::LightLower
+    { 0,  10 },  // Setting::LightUpper
     { 1,  0  },  // Setting::StartTime
     { 1,  8  },  // Setting::EndTime
     { 1,  15 },  // Setting::Cooldown
@@ -301,15 +454,17 @@ void printSettingsScreen()
     { 4,  0  },  // Setting::CurrentDate
     { 4,  12 },  // Setting::CurrentTime
   };
-  
-  gotoChar(coord[Setting::LightLow][ROW], coord[Setting::LightLow][COL]);
-  printSettingsLight("LLO", g_light_lower, g_setting == Setting::LightLow);
 
-  gotoChar(coord[Setting::LightHigh][ROW], coord[Setting::LightHigh][COL]);
-  printSettingsLight("LHI", g_light_upper, g_setting == Setting::LightHigh);
+  gotoChar(coord[Setting::LightLower][ROW], coord[Setting::LightLower][COL]);
+  printSettingsLight("LLO", g_light_lower, g_setting == Setting::LightLower);
+
+  gotoChar(coord[Setting::LightUpper][ROW], coord[Setting::LightUpper][COL]);
+  printSettingsLight("LHI", g_light_upper, g_setting == Setting::LightUpper);
 
   gotoChar(coord[Setting::StartTime][ROW], coord[Setting::StartTime][COL]);
   printSettingsTime(g_start_hour, g_start_minute, g_setting == Setting::StartTime);
+
+  display.print('-');
 
   gotoChar(coord[Setting::EndTime][ROW], coord[Setting::EndTime][COL]);
   printSettingsTime(g_end_hour, g_end_minute, g_setting == Setting::EndTime);
