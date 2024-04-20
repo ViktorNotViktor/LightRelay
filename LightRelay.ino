@@ -56,7 +56,7 @@ bool g_open_relay = false;
 DateTime g_now;
 uint16_t g_button = 0;
 unsigned long g_last_button_msec = 0;
-#define BUTTON_THRESHOLD_MS 200
+#define BUTTON_THRESHOLD_MSEC 250
 
 #define BTN_1 0x45
 #define BTN_2 0x46
@@ -85,9 +85,10 @@ void setup()
   // EEPROM
   readEEPROM();
 
-  // relay
+  // Relay
   pinMode(PIN_RELAY, OUTPUT);
 
+  // Display
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) // 0xD ?
 	{
 		Serial.println(F("SSD1306 allocation failed"));
@@ -103,6 +104,8 @@ void setup()
     Serial.println("Failed to init RTC");
     delay(1000);
   }
+
+  g_cooldown_start = DS3231M.now();
 
   // Light
   pinMode(PIN_LIGHT, INPUT);
@@ -144,11 +147,17 @@ void readEEPROM()
   SETTING_READ(g_light_lower);
   SETTING_READ(g_light_upper);
   SETTING_READ(g_start_hour);
+  validateHour(g_start_hour);
   SETTING_READ(g_start_minute);
+  validateMinute(g_start_minute);
   SETTING_READ(g_end_hour);
+  validateHour(g_end_hour);
   SETTING_READ(g_end_minute);
+  validateMinute(g_end_minute);
   SETTING_READ(g_cooldown_mins);
+  validate2Digit(g_cooldown_mins);
   SETTING_READ(g_screen_off_mins);
+  validate2Digit(g_screen_off_mins);
 }
 
 void writeEEPROM()
@@ -163,6 +172,37 @@ void writeEEPROM()
   SETTING_WRITE(g_cooldown_mins);
   SETTING_WRITE(g_screen_off_mins);
 }
+
+bool validateHour(uint8_t &hour)
+{
+  bool is_valid = hour <= 24;
+  if(!is_valid)
+  {
+    hour = 0;
+  }
+  return is_valid;
+}
+
+bool validateMinute(uint8_t &minute)
+{
+  bool is_valid = minute <= 59;
+  if(!is_valid)
+  {
+    minute = 0;
+  }
+  return is_valid;
+}
+
+bool validate2Digit(uint8_t &number)
+{
+  bool is_valid = number <= 99;
+  if(!is_valid)
+  {
+    number = 0;
+  }
+  return is_valid;
+}
+
 
 ////////////////////////////////////////////////////////
 void processRemote()
@@ -184,9 +224,10 @@ void processRemote()
         }
         Serial.println();
 
-        if (millis() - g_last_button_msec > BUTTON_THRESHOLD_MS)
+        if (millis() - g_last_button_msec > BUTTON_THRESHOLD_MSEC)
         {
           g_button = IrReceiver.decodedIRData.command;
+          g_last_button_msec = millis();
         }
         
         // /*
@@ -260,6 +301,21 @@ void processRelay()
 ////////////////////////////////////////////////////////
 void processDisplay()
 {
+  switch(g_button)
+  {
+    case BTN_HASH:
+      if(g_screen_mode == ScreenMode::Main)
+        g_screen_mode = ScreenMode::Settings;
+      resetButton();
+      break;
+    
+    case BTN_ASTERISK:
+      if(g_screen_mode == ScreenMode::Settings)
+        g_screen_mode = ScreenMode::Main;
+      resetButton();
+      break;
+  }
+
   switch(g_screen_mode)
   {
     case ScreenMode::Main:
@@ -365,13 +421,20 @@ void moveSettingByButton()
   // find position of the current setting
   uint8_t cur_row = 0, cur_col = 0;
   bool found = false;
-  for (cur_row = 0; cur_row < total_rows && !found; cur_row++)
+  for (uint8_t row = 0; row < total_rows && !found; row++)
   {
-    for (cur_col = 0; cur_col < total_cols && !found; cur_col++)
+    for (uint8_t col = 0; col < total_cols && !found; col++)
     {
-      found = pos[cur_row][cur_col] == g_setting;
+      cur_row = row;
+      cur_col = col;
+      found = pos[row][col] == g_setting;
     }
   }
+
+  Serial.print("row,col=");
+  Serial.print(cur_row);
+  Serial.print(',');
+  Serial.println(cur_col);
 
   auto fnLastInRow = [&](uint8_t row) -> Setting
   {
@@ -397,9 +460,13 @@ void moveSettingByButton()
       return pos[total_rows - 1][0];
   };
 
+  Serial.print("Setting=");
+  Serial.println(g_setting);
+
   switch (g_button)  
   {
     case BTN_RIGHT:
+      Serial.println("BTN_RIGH");
       if (cur_col + 1 < total_cols && pos[cur_row][cur_col + 1] != Setting_Size)
         g_setting = pos[cur_row][cur_col + 1];
       else
@@ -407,6 +474,7 @@ void moveSettingByButton()
       break;
 
     case BTN_LEFT:
+      Serial.println("BTN_LEFT");
       if (cur_col - 1 >= 0)
         g_setting = pos[cur_row][cur_col - 1];
       else
@@ -419,13 +487,18 @@ void moveSettingByButton()
       break;
 
     case BTN_DOWN:
+      Serial.println("BTN_DOWN");
       g_setting = fnFirstInLowerRow(cur_row);
       break;
 
     case BTN_UP:
+      Serial.println("BTN_UP");
       g_setting = fnFirstInUpperRow(cur_row);
       break;
   }
+
+  Serial.print("Setting=");
+  Serial.println(g_setting);
 
   resetButton();
 }
@@ -433,6 +506,8 @@ void moveSettingByButton()
 /////////////////////////////////////////////////////////
 void printSettingsScreen()
 {
+  display.clearDisplay();
+
   // 128x32 pixels
   // 21x4 characters
   //+---------------------+
@@ -450,9 +525,9 @@ void printSettingsScreen()
     { 1,  0  },  // Setting::StartTime
     { 1,  8  },  // Setting::EndTime
     { 1,  15 },  // Setting::Cooldown
-    { 3,  0  },  // Setting::ScreenOff
-    { 4,  0  },  // Setting::CurrentDate
-    { 4,  12 },  // Setting::CurrentTime
+    { 2,  0  },  // Setting::ScreenOff
+    { 3,  0  },  // Setting::CurrentDate
+    { 3,  12 },  // Setting::CurrentTime
   };
 
   gotoChar(coord[Setting::LightLower][ROW], coord[Setting::LightLower][COL]);
@@ -515,8 +590,8 @@ void printSettingsTime(uint8_t hour, uint8_t minute, bool is_selected)
 void printSettingsLight(const char* prefix, int light, bool is_selected)
 {
   setSelectedColor(false);
-  display.print('[');
   display.print(prefix);
+  display.print('[');
 
   setSelectedColor(is_selected);
   char buffer[6];
