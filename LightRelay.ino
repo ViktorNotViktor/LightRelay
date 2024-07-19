@@ -18,6 +18,12 @@ ScreenMode g_screen_mode = ScreenMode::Main;
 enum Setting { LightLower, LightUpper, StartTime, EndTime, Cooldown, ScreenOff, CurrentDate, CurrentTime, Setting_Size };
 Setting g_setting = Setting::LightLower;
 
+enum InputMode { View, Edit };
+InputMode g_input_mode = InputMode::View;
+
+uint32_t g_temp32 = 0;
+uint32_t g_temp32_limit = 0;
+
 // pins
 #define PIN_RELAY 13
 #define PIN_LIGHT A0
@@ -76,11 +82,22 @@ unsigned long g_last_button_msec = 0;
 #define BTN_RIGHT 0x5A
 #define BTN_OK  0x1C
 
+#define DEBUG
+#ifdef DEBUG
+#define LOG(x) Serial.print(x);
+#define LOGLN(x) Serial.println(x);
+#else
+#define LOG(x)
+#define LOGLN(x)
+#endif
+
 /////////////////////////////////////////////////////////
 void setup()
 {
   // debug console
+#ifdef DEBUG
   Serial.begin(9600);
+#endif
 
   // EEPROM
   readEEPROM();
@@ -91,7 +108,7 @@ void setup()
   // Display
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) // 0xD ?
 	{
-		Serial.println(F("SSD1306 allocation failed"));
+		LOGLN(F("SSD1306 allocation failed"));
   }
 
 	display.clearDisplay();
@@ -101,7 +118,9 @@ void setup()
   // RTC
   for (int i = 0; i < 5 && !DS3231M.begin(); i++)
   {
-    Serial.println("Failed to init RTC");
+    LOGLN("Failed to init RTC");
+    display.print("RTC failed ");
+    display.display();
     delay(1000);
   }
 
@@ -213,16 +232,20 @@ void processRemote()
          * Print a summary of received data
          */
         if (IrReceiver.decodedIRData.protocol == UNKNOWN) {
-            Serial.println(F("IR unknown"));
+           LOGLN(F("IR unknown"));
             // We have an unknown protocol here, print extended info
+#ifdef DEBUG            
             IrReceiver.printIRResultRawFormatted(&Serial, true);
+#endif            
             IrReceiver.resume(); // Do it here, to preserve raw data for printing with printIRResultRawFormatted()
         } else {
             IrReceiver.resume(); // Early enable receiving of the next IR frame
+#ifdef DEBUG            
             IrReceiver.printIRResultShort(&Serial);
             IrReceiver.printIRSendUsage(&Serial);
+#endif            
         }
-        Serial.println();
+        LOGLN("");
 
         if (millis() - g_last_button_msec > BUTTON_THRESHOLD_MSEC)
         {
@@ -305,13 +328,25 @@ void processDisplay()
   {
     case BTN_HASH:
       if(g_screen_mode == ScreenMode::Main)
+      {
         g_screen_mode = ScreenMode::Settings;
+        g_input_mode = InputMode::View;
+      }
       resetButton();
       break;
     
     case BTN_ASTERISK:
       if(g_screen_mode == ScreenMode::Settings)
-        g_screen_mode = ScreenMode::Main;
+      {
+        if (g_input_mode == InputMode::View)
+        {
+          g_screen_mode = ScreenMode::Main;
+        }
+        else
+        {
+          g_input_mode == InputMode::View;
+        }
+      }
       resetButton();
       break;
   }
@@ -402,9 +437,10 @@ void printLight(int light)
   display.print(buffer);
 }
 
-void moveSettingByButton()
+void processViewSettingsButtons()
 {
-  if (g_button != BTN_RIGHT && g_button != BTN_LEFT && g_button != BTN_DOWN && g_button != BTN_UP)
+  if (g_button != BTN_RIGHT && g_button != BTN_LEFT && g_button != BTN_DOWN && g_button != BTN_UP
+      && g_button != BTN_OK)
     return;
 
   constexpr uint8_t total_rows = 4;
@@ -431,11 +467,6 @@ void moveSettingByButton()
     }
   }
 
-  Serial.print("row,col=");
-  Serial.print(cur_row);
-  Serial.print(',');
-  Serial.println(cur_col);
-
   auto fnLastInRow = [&](uint8_t row) -> Setting
   {
     // skip invalid values at the end
@@ -460,13 +491,10 @@ void moveSettingByButton()
       return pos[total_rows - 1][0];
   };
 
-  Serial.print("Setting=");
-  Serial.println(g_setting);
-
   switch (g_button)  
   {
     case BTN_RIGHT:
-      Serial.println("BTN_RIGH");
+      LOGLN("BTN_RIGH");
       if (cur_col + 1 < total_cols && pos[cur_row][cur_col + 1] != Setting_Size)
         g_setting = pos[cur_row][cur_col + 1];
       else
@@ -474,7 +502,7 @@ void moveSettingByButton()
       break;
 
     case BTN_LEFT:
-      Serial.println("BTN_LEFT");
+      LOGLN("BTN_LEFT");
       if (cur_col - 1 >= 0)
         g_setting = pos[cur_row][cur_col - 1];
       else
@@ -487,22 +515,168 @@ void moveSettingByButton()
       break;
 
     case BTN_DOWN:
-      Serial.println("BTN_DOWN");
+      LOGLN("BTN_DOWN");
       g_setting = fnFirstInLowerRow(cur_row);
       break;
 
     case BTN_UP:
-      Serial.println("BTN_UP");
+      LOGLN("BTN_UP");
       g_setting = fnFirstInUpperRow(cur_row);
+      break;
+
+    case BTN_OK:
+      LOGLN("BTN_OK");
+      switch (g_input_mode)
+      {
+        case InputMode::View:
+          g_input_mode = InputMode::Edit;
+          setEditOptions();
+          break;
+        case InputMode::Edit:
+          g_input_mode = InputMode::View;
+          break;
+      }
       break;
   }
 
-  Serial.print("Setting=");
-  Serial.println(g_setting);
+  LOG("InputMode=");
+  LOGLN(g_input_mode);
 
   resetButton();
 }
 
+/////////////////////////////////////////////////////////
+void setEditOptions()
+{
+  g_temp32 = 0;
+
+  switch (g_setting)
+  {
+    case LightLower:
+    case LightUpper:
+      g_temp32_limit = 1024;
+      break;
+      
+    case StartTime:
+    case EndTime:
+    case CurrentTime:
+      g_temp32_limit = 2359;
+      break;
+      
+    case Cooldown:
+    case ScreenOff:
+      g_temp32_limit = 99;
+      break;
+
+    case CurrentDate:
+      g_temp32_limit = 30001231;
+      break;
+  }
+}
+
+void processEditSettingsButtons()
+{
+  switch (g_button)
+  {
+    case BTN_OK:
+      saveNewValue();
+      g_input_mode = InputMode::View;
+      break;
+    case BTN_0:
+      advanceTemp32Value(0);
+      break;
+    case BTN_1:
+      advanceTemp32Value(1);
+      break;
+    case BTN_2:
+      advanceTemp32Value(2);
+      break;
+    case BTN_3:
+      advanceTemp32Value(3);
+      break;
+    case BTN_4:
+      advanceTemp32Value(4);
+      break;
+    case BTN_5:
+      advanceTemp32Value(5);
+      break;
+    case BTN_6:
+      advanceTemp32Value(6);
+      break;
+    case BTN_7:
+      advanceTemp32Value(7);
+      break;
+    case BTN_8:
+      advanceTemp32Value(8);
+      break;
+    case BTN_9:
+      advanceTemp32Value(9);
+      break;
+    default:
+      return;
+  }
+
+  resetButton();
+}
+
+void saveNewValue()
+{
+  switch (g_setting)
+  {
+    case Setting::LightLower:
+      g_light_lower = g_temp32;
+      break;
+    case Setting::LightUpper:
+      g_light_upper = g_temp32;
+      break;
+    case Setting::StartTime:
+      getTimeFromTempValue(g_start_hour, g_start_minute);
+      break;
+    case Setting::EndTime:
+      getTimeFromTempValue(g_end_hour, g_end_minute);
+      break;
+    case Setting::Cooldown:
+      g_cooldown_mins = g_temp32;
+      break;
+    case Setting::ScreenOff:
+      g_screen_off_mins = g_temp32;
+      break;
+    case Setting::CurrentDate:
+      {
+        uint16_t year = 0;
+        uint8_t month = 0, day = 0;
+        getDateFromTempValue(year, month, day);
+        DateTime dt(year, month, day, g_now.hour(), g_now.minute(), g_now.second());
+        DS3231M.adjust(dt);
+      }
+      break;
+    case Setting::CurrentTime:
+      {
+        uint8_t hour = 0, minute = 0;
+        getTimeFromTempValue(hour, minute);
+        DateTime dt(g_now.year(), g_now.month(), g_now.day(), hour, minute, 0);
+        DS3231M.adjust(dt);
+      }
+      break;
+  }
+
+  writeEEPROM();
+
+  g_temp32 = 0;
+  g_temp32_limit = 0;
+}
+
+////////////////////////////////////////////////////////
+void advanceTemp32Value(uint8_t digit)
+{
+  uint32_t new32 = g_temp32 * 10 + digit;
+  if (new32 <= g_temp32_limit)
+  {
+    g_temp32 = new32;
+  }
+}
+
+//void processViewSettingsButtons();
 /////////////////////////////////////////////////////////
 void printSettingsScreen()
 {
@@ -516,8 +690,20 @@ void printSettingsScreen()
   //|SCR OFF[XX]..........|
   //|[YYYY-MM-DD][HH:NN]..|
   //+---------------------+
-  moveSettingByButton();
 
+  switch (g_input_mode)
+  {
+    case InputMode::View:
+      processViewSettingsButtons();
+      break;
+
+    case InputMode::Edit:
+      processEditSettingsButtons();
+      break;
+  }
+
+  
+  
   enum Coord { ROW, COL, Coord_Size };
   uint8_t coord[Setting::Setting_Size][Coord_Size] = {
     { 0,  0  },  // Setting::LightLower
@@ -531,10 +717,10 @@ void printSettingsScreen()
   };
 
   gotoChar(coord[Setting::LightLower][ROW], coord[Setting::LightLower][COL]);
-  printSettingsLight("LLO", g_light_lower, g_setting == Setting::LightLower);
+  printSettingsLight("LLO[", g_light_lower, g_setting == Setting::LightLower);
 
   gotoChar(coord[Setting::LightUpper][ROW], coord[Setting::LightUpper][COL]);
-  printSettingsLight("LHI", g_light_upper, g_setting == Setting::LightUpper);
+  printSettingsLight("LHI[", g_light_upper, g_setting == Setting::LightUpper);
 
   gotoChar(coord[Setting::StartTime][ROW], coord[Setting::StartTime][COL]);
   printSettingsTime(g_start_hour, g_start_minute, g_setting == Setting::StartTime);
@@ -557,79 +743,88 @@ void printSettingsScreen()
   printSettingsTime(g_now.hour(), g_now.minute(), g_setting == Setting::CurrentTime);
 }
 
+////////////////////////////////////////////////////////////
+void printSetting(const char* prefix, const char* value, const char* suffix, bool is_selected)
+{
+    setSelectedColor(is_selected);
+    display.print(prefix);
+    setSelectedColor(is_selected && g_input_mode == InputMode::View);
+    display.print(value);
+    setSelectedColor(is_selected);
+    display.print(suffix);
+}
+/////////////////////////////////////////////////////////
+void getDateFromTempValue(uint16_t& year, uint8_t month, uint8_t day)
+{
+  year = g_temp32 / 10000;
+  month = g_temp32 - year;
+  day = g_temp32 - year - month;
+}
+/////////////////////////////////////////////////////////
 void printSettingsDate(bool is_selected)
 {
-  setSelectedColor(false);
-  display.print('[');
-
-  setSelectedColor(is_selected);
   char buffer[11];
-  sprintf(buffer, "%04u-%02u-%02u", g_now.year(), g_now.month(), g_now.day());
-  display.print(buffer);
 
-  setSelectedColor(false);
-  display.print(']');
+  uint16_t year = 0;
+  uint8_t month = 0;
+  uint8_t day = 0;
+  if (g_input_mode == InputMode::Edit)
+  {
+    getDateFromTempValue(year, month, day);
+  }
+  else
+  {
+    year = g_now.year();
+    month = g_now.month();
+    day = g_now.day();
+  }
+
+  snprintf(buffer, 11, "%04u-%02u-%02u", year, month, day);
+  printSetting("[", buffer, "]", is_selected);
 }
 
 //////////////////////////////////////////////////////////////////////////
+void getTimeFromTempValue(uint8_t& hour, uint8_t& minute)
+{
+  hour = g_temp32 / 100;
+  minute = g_temp32 - hour;
+}
+//////////////////////////////////////////////////////////////////////////
 void printSettingsTime(uint8_t hour, uint8_t minute, bool is_selected)
 {
-  setSelectedColor(false);
-  display.print('[');
-
-  setSelectedColor(is_selected);
   char buffer[6];
-  sprintf(buffer, "%02u:%02u", hour, minute);
-  display.print(buffer);
 
-  setSelectedColor(false);
-  display.print(']');
+  if (g_input_mode == InputMode::Edit)
+  {
+    getTimeFromTempValue(hour, minute);
+  }
+
+  snprintf(buffer, 6, "%02u:%02u", hour, minute);
+  printSetting("[", buffer, "]", is_selected);
 };
 
 ////////////////////////////////////////////////////////////
 void printSettingsLight(const char* prefix, int light, bool is_selected)
 {
-  setSelectedColor(false);
-  display.print(prefix);
-  display.print('[');
-
-  setSelectedColor(is_selected);
   char buffer[6];
-  sprintf(buffer, "%04d", light);
-  display.print(buffer);
-
-  setSelectedColor(false);
-  display.print(']');
+  snprintf(buffer, 5, "%04d", g_input_mode == InputMode::View ? light : g_temp32);
+  printSetting(prefix, buffer, "]", is_selected);
 };
 
 ////////////////////////////////////////////////////////
 void printSettingsCooldown(bool is_selected)
 {
-  setSelectedColor(false);
-  display.print("CD[");
-
-  setSelectedColor(is_selected);
   char buffer[4];
-  sprintf(buffer, "%02d", g_cooldown_mins);
-  display.print(buffer);
-
-  setSelectedColor(false);
-  display.print(']');
+  snprintf(buffer, 3, "%02d", g_input_mode == InputMode::View ? g_cooldown_mins: g_temp32);
+  printSetting("CD[", buffer, "]", is_selected);
 };
 
 ////////////////////////////////////////////////////////
 void printSettingsScreenOff(bool is_selected)
 {
-  setSelectedColor(false);
-  display.print("SCR OFF[");
-
-  setSelectedColor(is_selected);
   char buffer[4];
-  sprintf(buffer, "%02d", g_screen_off_mins);
-  display.print(buffer);
-
-  setSelectedColor(false);
-  display.print(']');
+  snprintf(buffer, 3, "%02d", g_input_mode == InputMode::View ? g_screen_off_mins : g_temp32);
+  printSetting("SCR OFF[", buffer, "]", is_selected);
 };
 
 ////////////////////////////////////////////////////////
